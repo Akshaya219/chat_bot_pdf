@@ -5,12 +5,7 @@ import tempfile
 
 # Third-party imports
 import streamlit as st
-try:
-    import fitz  # PyMuPDF
-except ImportError:
-    st.error("PyMuPDF not installed correctly. Please check requirements.txt.")
-    st.stop()
-
+import pymupdf as fitz  # PyMuPDF
 import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -86,6 +81,15 @@ def search_pdf_and_answer(query, vector_store, images_per_page):
 
 # Streamlit UI
 st.title("📄 PDF Chatbot with Gemini API 🤖")
+
+# Temporary diagnostic check
+try:
+    import pymupdf
+    st.write(f"PyMuPDF version: {pymupdf.__version__}")
+except ImportError:
+    st.error("PyMuPDF not installed correctly. Please check requirements.txt.")
+    st.stop()
+
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
 if uploaded_file:
@@ -104,4 +108,4 @@ if uploaded_file:
         if relevant_images:
             st.write("#### Relevant Images:")
             for img_path in relevant_images:
-                st.image(img_path, use_column_width=True)PyMuPDF not installed correctly. Please check requirements.txt.
+                st.image(img_path, use_column_width=True)
