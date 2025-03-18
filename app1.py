@@ -15,7 +15,7 @@ import google.generativeai as genai
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_core.documents import Document  # Corrected import
+from langchain.docstore.document import Document
 from sentence_transformers import SentenceTransformer
 
 # Configure API with environment variable
@@ -65,7 +65,7 @@ def index_pdf_text(text_per_page):
 # Function to query Gemini API with concise prompt
 def query_gemini(prompt, context):
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")  # Updated to a valid model
+        model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(
             f"Context: {context}\nUser Query: {prompt}\nProvide a short and concise answer suitable for exam preparation."
         )
@@ -104,4 +104,4 @@ if uploaded_file:
         if relevant_images:
             st.write("#### Relevant Images:")
             for img_path in relevant_images:
-                st.image(img_path, use_column_width=True)
+                st.image(img_path, use_column_width=True)PyMuPDF not installed correctly. Please check requirements.txt.
