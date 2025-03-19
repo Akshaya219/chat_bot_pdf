@@ -200,7 +200,7 @@ def index_pdf_text(text_per_page, pdf_id):
 def load_vector_store(vector_store_path):
     try:
         embedding_function = get_embedding_function()
-        return FAISS.load_local(vector_store_path, embedding_function)
+        return FAISS.load_local(vector_store_path, embedding_function, allow_dangerous_deserialization=True)
     except Exception as e:
         st.error(f"Error loading vector store: {e}")
         return None
