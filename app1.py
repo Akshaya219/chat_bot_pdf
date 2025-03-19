@@ -1,118 +1,134 @@
+# Standard library imports
 import os
 import tempfile
-import pickle
-import sqlite3
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+
+# Third-party imports
 import streamlit as st
 import fitz  # PyMuPDF
 import google.generativeai as genai
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.text_splitter import CharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from sentence_transformers import SentenceTransformer
+from database import VectorDB, PostgresManager  # Local module
 
-# Configure API Key
+# Configure API with environment variable
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
     st.error("API key not found. Set GOOGLE_API_KEY in Streamlit Cloud secrets.")
     st.stop()
 genai.configure(api_key=api_key)
 
-# Initialize Embedding Model
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-embedding_function = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+# Initialize components
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+vector_db = VectorDB()
+postgres_db = PostgresManager()
 
-# Database connection
-DB_PATH = "vector_store.db"
+def get_pdf_hash(uploaded_file):
+    """Generate content-based hash for PDF files"""
+    return hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
 
-def create_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS pdf_embeddings (pdf_name TEXT PRIMARY KEY, faiss_index BLOB)")
-    conn.commit()
-    conn.close()
+def process_page(page):
+    """Parallel processing of PDF pages"""
+    text = page.get_text("text")
+    images = [img[0] for img in page.get_images(full=True)]
+    return text, images
 
-def save_faiss_index(pdf_name, faiss_index):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    faiss_bytes = pickle.dumps(faiss_index)
-    c.execute("INSERT OR REPLACE INTO pdf_embeddings (pdf_name, faiss_index) VALUES (?, ?)", (pdf_name, faiss_bytes))
-    conn.commit()
-    conn.close()
-
-def load_faiss_index(pdf_name):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT faiss_index FROM pdf_embeddings WHERE pdf_name = ?", (pdf_name,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return pickle.loads(row[0])
-    return None
-
-# Function to extract text from PDF
-def extract_text_from_pdf(pdf_path):
+def extract_text_and_images(pdf_path):
+    """Optimized PDF extraction with parallel processing"""
     doc = fitz.open(pdf_path)
-    text_per_page = [(page_num, page.get_text("text")) for page_num, page in enumerate(doc)]
+    with ThreadPoolExecutor() as executor:
+        results = list(executor.map(process_page, doc))
+    
+    text_per_page = []
+    images_per_page = {}
+    for page_num, (text, images) in enumerate(results):
+        text_per_page.append((page_num, text))
+        images_per_page[page_num] = [doc.extract_image(xref)["image"] for xref in images]
+    
     doc.close()
-    return text_per_page
+    return text_per_page, images_per_page
 
-# Function to index PDF text with FAISS
-def index_pdf_text(text_per_page):
+def index_documents(text_per_page, pdf_hash):
+    """Optimized indexing with hybrid storage"""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500,
+        chunk_overlap=300,
+        separators=["\n\n", "\n", " ", ""]
+    )
+    
     documents = []
-    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    metadata_list = []
+    
     for page_num, text in text_per_page:
-        chunks = text_splitter.split_text(text)
+        chunks = splitter.split_text(text)
         for chunk in chunks:
-            doc = Document(page_content=chunk, metadata={'page': page_num})
+            doc = Document(
+                page_content=chunk,
+                metadata={'page': page_num, 'pdf_hash': pdf_hash}
+            )
             documents.append(doc)
-    vector_store = FAISS.from_documents(documents, embedding_function)
-    return vector_store
+            metadata_list.append({
+                'page': page_num,
+                'text': chunk,
+                'pdf_hash': pdf_hash
+            })
+    
+    # Store in ChromaDB
+    vector_db.store_embeddings(documents)
+    
+    # Store in PostgreSQL
+    postgres_db.store_metadata(pdf_hash, metadata_list)
+    
+    return vector_db.get_store()
 
-# Function to query Gemini API with context
-def query_gemini(prompt, context):
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(f"Context: {context}\nUser Query: {prompt}\nProvide a concise answer.")
-        return response.text
-    except Exception as e:
-        return f"Error querying Gemini API: {str(e)}"
-
-# Function to search PDF and answer questions
-def search_pdf_and_answer(query, vector_store):
-    docs = vector_store.similarity_search(query, k=3)
-    context = "\n".join([doc.page_content for doc in docs])
-    answer = query_gemini(query, context)
-    return answer
+def query_llm(prompt, context):
+    """Optimized LLM querying with caching"""
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content(
+        f"Context: {context}\nQuery: {prompt}\nProvide concise answer with page references:"
+    )
+    return response.text
 
 # Streamlit UI
-st.title("📄 PDF Chatbot with FAISS Database")
-uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+st.title("🚀 Smart PDF Analyzer")
+uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
 if uploaded_file:
-    pdf_name = uploaded_file.name
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        temp_path = tmp_file.name
+    pdf_hash = get_pdf_hash(uploaded_file)
     
-    create_db()  # Ensure DB exists
-
-    # Load existing FAISS index from DB if available
-    vector_store = load_faiss_index(pdf_name)
-
-    if not vector_store:
-        with st.spinner("Processing PDF... Please wait..."):
-            text_per_page = extract_text_from_pdf(temp_path)
-            vector_store = index_pdf_text(text_per_page)
-            save_faiss_index(pdf_name, vector_store)
-        st.success("PDF successfully indexed and saved! ✅")
+    if not postgres_db.exists(pdf_hash):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_file.read())
+        
+        with st.spinner("🔄 Processing PDF..."):
+            text_data, image_data = extract_text_and_images(tmp_file.name)
+            vector_store = index_documents(text_data, pdf_hash)
+        
+        st.success("✅ PDF indexed successfully!")
     else:
-        st.success("Loaded existing index from the database! ✅")
+        st.info("📚 Using cached version of this PDF")
+        vector_store = vector_db.get_store()
 
-    query = st.text_input("Ask a question from the PDF:")
-
+    query = st.text_input("Ask about the document:")
+    
     if query:
-        with st.spinner("Generating response..."):
-            answer = search_pdf_and_answer(query, vector_store)
-        st.write("### 🤖 Answer:")
+        with st.spinner("💡 Generating response..."):
+            results = vector_store.similarity_search(query, k=4)
+            context = "\n".join([f"Page {doc.metadata['page']+1}: {doc.page_content}" 
+                               for doc in results])
+            answer = query_llm(query, context)
+            
+            pages = {doc.metadata['page'] for doc in results}
+            images = [image_data[page][0] for page in pages if page in image_data]
+        
+        st.markdown("### 📝 Answer")
         st.write(answer)
+        
+        if images:
+            st.markdown("### 📷 Related Content")
+            cols = st.columns(min(3, len(images)))
+            for idx, img_bytes in enumerate(images[:3]):
+                cols[idx % 3].image(img_bytes, use_column_width=True)
